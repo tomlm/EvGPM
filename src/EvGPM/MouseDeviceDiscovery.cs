@@ -36,7 +36,12 @@ public class MouseDeviceDiscovery
                     {
                         string deviceName = EvDev.GetDeviceName(fd);
                         mouseDevices.Add(devicePath);
-                        Console.WriteLine($"Found mouse device: {devicePath} ({deviceName})");
+
+                        bool hasRel = EvDev.HasEventType(fd, EvDev.EV_REL);
+                        bool hasAbs = EvDev.HasEventType(fd, EvDev.EV_ABS);
+                        string eventTypes = $"REL={hasRel}, ABS={hasAbs}";
+
+                        Console.WriteLine($"Found mouse device: {devicePath} ({deviceName}) [{eventTypes}]");
                     }
                 }
                 finally
@@ -57,13 +62,14 @@ public class MouseDeviceDiscovery
     private static bool IsMouseDevice(int fd)
     {
         // A mouse typically has:
-        // - Relative axes (REL_X, REL_Y)
+        // - Relative axes (REL_X, REL_Y) OR Absolute axes (ABS_X, ABS_Y) for touchpads/tablets
         // - Button events (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE)
         
         bool hasRelativeMovement = EvDev.HasEventType(fd, EvDev.EV_REL);
+        bool hasAbsoluteMovement = EvDev.HasEventType(fd, EvDev.EV_ABS);
         bool hasButtons = EvDev.HasEventType(fd, EvDev.EV_KEY);
 
-        return hasRelativeMovement && hasButtons;
+        return (hasRelativeMovement || hasAbsoluteMovement) && hasButtons;
     }
 
     public static string? SelectMouseDevice(string? preferredDevice = null)

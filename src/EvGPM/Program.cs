@@ -27,7 +27,7 @@ class Program
         }
 
         // Discover and select mouse device
-        string? devicePath = MouseDeviceDiscovery.SelectMouseDevice(config.DevicePath);
+        string? devicePath = MouseDeviceDiscovery.SelectMouseDevice(config.DevicePath ?? "/dev/input/mice");
         if (devicePath == null)
         {
             Console.Error.WriteLine("Error: No suitable mouse device found");
@@ -74,58 +74,65 @@ class Program
         Console.WriteLine("Daemon running. Press Ctrl+C to exit.");
         Console.WriteLine();
 
-        int fd = EvDev.Open(devicePath);
-        if (fd < 0)
-        {
-            throw new InvalidOperationException($"Cannot open device: {devicePath}");
-        }
+        using var stream = EvDev.OpenAsStream(devicePath);
+        int fd = (int)stream.SafeFileHandle.DangerousGetHandle();
 
         try
         {
-            EvDev.Grab(fd, true); // Grab exclusive access to prevent interference
+            EvDev.Grab(fd, true); // Grab exclusive access
+
+            var cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
 
             // Main event loop
-            while (_running)
+            while (!cts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    if (EvDev.ReadEvent(fd, out var inputEvent))
+                    var (success, inputEvent) = await EvDev.ReadEventAsync(stream, cts.Token);
+                    
+                    if (success)
                     {
                         switch (inputEvent.Type)
                         {
                             case EvDev.EV_KEY:
-                                // Button press/release
                                 _processor.ProcessButtonEvent(inputEvent);
                                 break;
 
+                            case EvDev.EV_ABS:
+                                _processor.ProcessAbsoluteMotion(inputEvent);
+                                break;
+
                             case EvDev.EV_REL:
-                                // Relative motion or wheel
                                 _processor.ProcessRelativeMotion(inputEvent);
                                 break;
 
                             case EvDev.EV_SYN:
-                                // Sync event - marks end of event batch
                                 break;
                         }
                     }
                     else
                     {
-                        // No event available, small delay to prevent CPU spinning
-                        await Task.Delay(1);
+                        // No event available, small delay
+                        await Task.Delay(1, cts.Token);
                     }
                 }
-                catch (Exception ex) when (_running)
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Error processing event: {ex.Message}");
-                    await Task.Delay(100); // Back off on errors
+                    await Task.Delay(100, cts.Token);
                 }
             }
 
-            EvDev.Grab(fd, false); // Release device
+            EvDev.Grab(fd, false);
         }
         finally
         {
-            EvDev.Close(fd);
+            stream.Close(); // This will close the fd
         }
 
         Console.WriteLine("Daemon stopped.");

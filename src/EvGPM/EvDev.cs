@@ -20,12 +20,20 @@ public static class EvDev
     public const ushort REL_WHEEL = 0x08;
     public const ushort REL_HWHEEL = 0x06;
 
+    // Absolute axes
+    public const ushort ABS_X = 0x00;
+    public const ushort ABS_Y = 0x01;
+    public const ushort ABS_Z = 0x02;
+
     // Mouse buttons
     public const ushort BTN_LEFT = 0x110;
     public const ushort BTN_RIGHT = 0x111;
     public const ushort BTN_MIDDLE = 0x112;
     public const ushort BTN_SIDE = 0x113;
     public const ushort BTN_EXTRA = 0x114;
+    public const ushort BTN_FORWARD = 0x115;
+    public const ushort BTN_BACK = 0x116;
+    public const ushort BTN_TASK = 0x117;
 
     // ioctl commands
     private const uint EVIOCGRAB = 0x40044590;
@@ -161,5 +169,46 @@ public static class EvDev
         {
             Marshal.FreeHGlobal(buffer);
         }
+    }
+
+    public static FileStream OpenAsStream(string devicePath)
+    {
+        int fd = open(devicePath, O_RDONLY | O_NONBLOCK);
+        if (fd < 0)
+            throw new IOException($"Cannot open device: {devicePath}");
+        
+        var handle = new Microsoft.Win32.SafeHandles.SafeFileHandle((IntPtr)fd, ownsHandle: true);
+        return new FileStream(handle, FileAccess.Read, bufferSize: Marshal.SizeOf<InputEvent>());
+    }
+
+    public static async Task<(bool success, InputEvent evt)> ReadEventAsync(FileStream stream, CancellationToken cancellationToken = default)
+    {
+        int size = Marshal.SizeOf<InputEvent>();
+        byte[] buffer = new byte[size];
+        
+        try
+        {
+            int bytesRead = await stream.ReadAsync(buffer, 0, size, cancellationToken);
+            if (bytesRead == size)
+            {
+                IntPtr ptr = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.Copy(buffer, 0, ptr, size);
+                    var evt = Marshal.PtrToStructure<InputEvent>(ptr);
+                    return (true, evt);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(ptr);
+                }
+            }
+        }
+        catch (IOException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // EAGAIN/EWOULDBLOCK - no data available
+        }
+        
+        return (false, default);
     }
 }
