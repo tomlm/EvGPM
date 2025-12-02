@@ -72,17 +72,32 @@ public static class EvDev
     [DllImport("libc", SetLastError = true, EntryPoint = "ioctl")]
     private static extern int ioctl_bytes(int fd, uint request, byte[] arg);
 
+    /// <summary>
+    /// Opens an input device for reading in blocking mode.
+    /// </summary>
+    /// <param name="devicePath">Path to the device file (e.g., /dev/input/event0)</param>
+    /// <returns>File descriptor on success, -1 on failure</returns>
     public static int Open(string devicePath)
     {
         return open(devicePath, O_RDONLY);
     }
 
+    /// <summary>
+    /// Closes an open device file descriptor.
+    /// </summary>
+    /// <param name="fd">File descriptor to close</param>
     public static void Close(int fd)
     {
         if (fd >= 0)
             close(fd);
     }
 
+    /// <summary>
+    /// Reads a single input event from the device synchronously (blocking).
+    /// </summary>
+    /// <param name="fd">File descriptor of the open device</param>
+    /// <param name="evt">Output parameter containing the read event</param>
+    /// <returns>True if an event was successfully read, false otherwise</returns>
     public static unsafe bool ReadEvent(int fd, out InputEvent evt)
     {
         evt = default;
@@ -105,12 +120,23 @@ public static class EvDev
         }
     }
 
+    /// <summary>
+    /// Grabs or releases exclusive access to the input device.
+    /// When grabbed, other applications cannot read events from this device.
+    /// </summary>
+    /// <param name="fd">File descriptor of the open device</param>
+    /// <param name="grab">True to grab exclusive access, false to release</param>
     public static void Grab(int fd, bool grab)
     {
         int value = grab ? 1 : 0;
         ioctl_int(fd, EVIOCGRAB, ref value);
     }
 
+    /// <summary>
+    /// Retrieves the human-readable name of the input device.
+    /// </summary>
+    /// <param name="fd">File descriptor of the open device</param>
+    /// <returns>Device name string, or "Unknown" if the name cannot be retrieved</returns>
     public static string GetDeviceName(int fd)
     {
         byte[] buffer = new byte[256];
@@ -126,6 +152,12 @@ public static class EvDev
         return "Unknown";
     }
 
+    /// <summary>
+    /// Checks whether the device supports a specific event type (e.g., EV_KEY, EV_REL, EV_ABS).
+    /// </summary>
+    /// <param name="fd">File descriptor of the open device</param>
+    /// <param name="eventType">Event type constant to check (e.g., EV_KEY, EV_REL)</param>
+    /// <returns>True if the device supports the event type, false otherwise</returns>
     public static bool HasEventType(int fd, ushort eventType)
     {
         byte[] buffer = new byte[32]; // 256 bits = 32 bytes
@@ -145,6 +177,12 @@ public static class EvDev
         return false;
     }
 
+    /// <summary>
+    /// Opens an input device as a FileStream in non-blocking mode for asynchronous reading.
+    /// </summary>
+    /// <param name="devicePath">Path to the device file (e.g., /dev/input/event0)</param>
+    /// <returns>FileStream wrapping the device file descriptor</returns>
+    /// <exception cref="IOException">Thrown if the device cannot be opened</exception>
     public static FileStream OpenAsStream(string devicePath)
     {
         int fd = open(devicePath, O_RDONLY | O_NONBLOCK);
@@ -155,6 +193,13 @@ public static class EvDev
         return new FileStream(handle, FileAccess.Read, bufferSize: Marshal.SizeOf<InputEvent>());
     }
 
+    /// <summary>
+    /// Asynchronously reads a single input event from the device stream.
+    /// Returns immediately if no event is available (non-blocking).
+    /// </summary>
+    /// <param name="stream">FileStream opened with OpenAsStream</param>
+    /// <param name="cancellationToken">Optional cancellation token</param>
+    /// <returns>Tuple containing success flag and the input event if successful</returns>
     public static async Task<(bool success, InputEvent evt)> ReadEventAsync(FileStream stream, CancellationToken cancellationToken = default)
     {
         int size = Marshal.SizeOf<InputEvent>();
