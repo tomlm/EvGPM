@@ -66,6 +66,12 @@ public static class EvDev
     [DllImport("libc", SetLastError = true)]
     private static extern int ioctl(int fd, uint request, IntPtr arg);
 
+    [DllImport("libc", SetLastError = true, EntryPoint = "ioctl")]
+    private static extern int ioctl_int(int fd, uint request, ref int arg);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "ioctl")]
+    private static extern int ioctl_bytes(int fd, uint request, byte[] arg);
+
     public static int Open(string devicePath)
     {
         return open(devicePath, O_RDONLY);
@@ -101,74 +107,42 @@ public static class EvDev
 
     public static void Grab(int fd, bool grab)
     {
-        IntPtr arg = Marshal.AllocHGlobal(sizeof(int));
-        try
-        {
-            Marshal.WriteInt32(arg, grab ? 1 : 0);
-            ioctl(fd, EVIOCGRAB, arg);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(arg);
-        }
+        int value = grab ? 1 : 0;
+        ioctl_int(fd, EVIOCGRAB, ref value);
     }
 
-    public static unsafe string GetDeviceName(int fd)
+    public static string GetDeviceName(int fd)
     {
-        const int bufferSize = 256;
-        IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
-        
-        try
+        byte[] buffer = new byte[256];
+        int result = ioctl_bytes(fd, EVIOCGNAME, buffer);
+    
+        if (result > 0)
         {
-            // Clear buffer
-            for (int i = 0; i < bufferSize; i++)
-                Marshal.WriteByte(buffer, i, 0);
-
-            int result = ioctl(fd, EVIOCGNAME, buffer);
-            if (result > 0)
-            {
-                return Marshal.PtrToStringAnsi(buffer) ?? "Unknown";
-            }
-            return "Unknown";
+            int length = Array.IndexOf(buffer, (byte)0);
+            if (length < 0) length = buffer.Length;
+            return System.Text.Encoding.ASCII.GetString(buffer, 0, length);
         }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+    
+        return "Unknown";
     }
 
-    public static unsafe bool HasEventType(int fd, ushort eventType)
+    public static bool HasEventType(int fd, ushort eventType)
     {
-        const int bitsPerByte = 8;
-        const int maxBits = 256;
-        int byteSize = maxBits / bitsPerByte;
-        IntPtr buffer = Marshal.AllocHGlobal(byteSize);
-        
-        try
-        {
-            // Clear buffer
-            for (int i = 0; i < byteSize; i++)
-                Marshal.WriteByte(buffer, i, 0);
-
-            uint request = EVIOCGBIT | ((uint)eventType << 8);
-            int result = ioctl(fd, request, buffer);
-            
-            if (result >= 0)
-            {
-                // Check if any bit is set
-                byte* ptr = (byte*)buffer;
-                for (int i = 0; i < byteSize; i++)
-                {
-                    if (ptr[i] != 0)
-                        return true;
-                }
-            }
+        byte[] buffer = new byte[32]; // 256 bits = 32 bytes
+        uint request = EVIOCGBIT | ((uint)eventType << 8);
+    
+        int result = ioctl_bytes(fd, request, buffer);
+        if (result < 0)
             return false;
-        }
-        finally
+    
+        // Check if any bit is set
+        foreach (byte b in buffer)
         {
-            Marshal.FreeHGlobal(buffer);
+            if (b != 0)
+                return true;
         }
+    
+        return false;
     }
 
     public static FileStream OpenAsStream(string devicePath)
@@ -191,17 +165,8 @@ public static class EvDev
             int bytesRead = await stream.ReadAsync(buffer, 0, size, cancellationToken);
             if (bytesRead == size)
             {
-                IntPtr ptr = Marshal.AllocHGlobal(size);
-                try
-                {
-                    Marshal.Copy(buffer, 0, ptr, size);
-                    var evt = Marshal.PtrToStructure<InputEvent>(ptr);
-                    return (true, evt);
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(ptr);
-                }
+                var evt = MemoryMarshal.Read<InputEvent>(buffer);
+                return (true, evt);
             }
         }
         catch (IOException) when (!cancellationToken.IsCancellationRequested)
