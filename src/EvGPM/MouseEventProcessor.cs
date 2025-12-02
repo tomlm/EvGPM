@@ -10,6 +10,7 @@ public class MouseEventProcessor
     private readonly AnsiMouseEncoder _encoder;
     private readonly TtyOutputHandler _ttyOutput;
     private readonly Dictionary<int, bool> _buttonStates;
+    private readonly Func<bool> _isTrackingEnabled;
     
     // Mouse position tracking
     private int _currentX = 0;
@@ -19,11 +20,12 @@ public class MouseEventProcessor
     private int _terminalWidth = 80;
     private int _terminalHeight = 24;
     
-    public MouseEventProcessor(AnsiMouseEncoder encoder, TtyOutputHandler ttyOutput)
+    public MouseEventProcessor(AnsiMouseEncoder encoder, TtyOutputHandler ttyOutput, Func<bool>? isTrackingEnabled = null)
     {
         _encoder = encoder;
         _ttyOutput = ttyOutput;
         _buttonStates = new Dictionary<int, bool>();
+        _isTrackingEnabled = isTrackingEnabled ?? (() => true); // Default: always enabled (legacy behavior)
         
         // Try to get actual terminal dimensions
         UpdateTerminalDimensions();
@@ -35,6 +37,13 @@ public class MouseEventProcessor
     public void ProcessButtonEvent(EvDev.InputEvent inputEvent)
     {
         Console.WriteLine($"[{_currentX},{_currentY}] Button event: type={inputEvent.Type} code={inputEvent.Code}, value={inputEvent.Value}");
+        
+        // Only send events if mouse tracking is enabled
+        if (!_isTrackingEnabled())
+        {
+            return;
+        }
+        
         int button = MapEvDevButtonToAnsi(inputEvent.Code);
         if (button < 0) return; // Unknown button
 
@@ -71,10 +80,16 @@ public class MouseEventProcessor
                 break;
             case EvDev.REL_WHEEL:
                 ProcessScrollWheel(inputEvent.Value);
-                break;
+                return; // Scroll wheel handling is separate
             case EvDev.REL_HWHEEL:
                 // Horizontal wheel - could be supported in future
-                break;
+                return;
+        }
+
+        // Only send motion events if mouse tracking is enabled
+        if (!_isTrackingEnabled())
+        {
+            return;
         }
 
         // If any button is pressed, send motion event

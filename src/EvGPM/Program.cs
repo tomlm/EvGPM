@@ -67,12 +67,35 @@ class Program
             throw new InvalidOperationException("Cannot write to TTY output");
         }
 
+        // Initialize mouse tracking monitor
+        TtyInputMonitor? trackingMonitor = null;
+        if (config.HonorTrackingCommands)
+        {
+            trackingMonitor = new TtyInputMonitor(config.TtyPath);
+            Console.WriteLine("Mouse tracking control: Enabled (will only send events when apps request it)");
+        }
+        else
+        {
+            Console.WriteLine("Mouse tracking control: Disabled (always sending events)");
+        }
+
         var encoder = new AnsiMouseEncoder(config.Protocol);
-        _processor = new MouseEventProcessor(encoder, ttyOutput);
+        _processor = new MouseEventProcessor(
+            encoder, 
+            ttyOutput,
+            () => trackingMonitor?.MouseTrackingEnabled ?? true
+        );
 
         Console.WriteLine($"Mouse protocol: {config.Protocol}");
         Console.WriteLine("Daemon running. Press Ctrl+C to exit.");
         Console.WriteLine();
+
+        // Start tracking monitor if enabled
+        var cts = new CancellationTokenSource();
+        if (trackingMonitor != null)
+        {
+            _ = trackingMonitor.StartMonitoringAsync(cts.Token);
+        }
 
         using var stream = EvDev.OpenAsStream(devicePath);
         int fd = (int)stream.SafeFileHandle.DangerousGetHandle();
@@ -80,9 +103,6 @@ class Program
         try
         {
             EvDev.Grab(fd, true); // Grab exclusive access
-
-            var cts = new CancellationTokenSource();
-            Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
 
             // Main event loop
             while (!cts.Token.IsCancellationRequested)
@@ -135,6 +155,8 @@ class Program
             stream.Close(); // This will close the fd
         }
 
+        cts.Cancel();
+        trackingMonitor?.Dispose();
         Console.WriteLine("Daemon stopped.");
     }
 
@@ -171,6 +193,11 @@ class Program
                             config.Protocol = protocol;
                     }
                     break;
+
+                case "--honor-tracking":
+                case "--smart":
+                    config.HonorTrackingCommands = true;
+                    break;
             }
         }
 
@@ -206,5 +233,6 @@ Note: May require root privileges to access /dev/input devices.
         public string? DevicePath { get; set; }
         public string? TtyPath { get; set; }
         public AnsiMouseEncoder.MouseProtocol Protocol { get; set; } = AnsiMouseEncoder.MouseProtocol.SGR;
+        public bool HonorTrackingCommands { get; set; } = false;
     }
 }
