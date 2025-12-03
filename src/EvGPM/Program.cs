@@ -2,8 +2,8 @@
 
 class Program
 {
-    private static bool _running = true;
     private static MouseEventProcessor? _processor;
+    private static CancellationTokenSource? _cts;
 
     static async Task<int> Main(string[] args)
     {
@@ -37,17 +37,25 @@ class Program
 
         Console.WriteLine($"Using mouse device: {devicePath}");
         
+        // Create cancellation token source for clean shutdown
+        _cts = new CancellationTokenSource();
+        
         // Set up signal handlers for graceful shutdown
         Console.CancelKeyPress += (sender, e) =>
         {
             e.Cancel = true;
-            _running = false;
             Console.WriteLine("\nShutting down...");
+            _cts?.Cancel();
         };
 
         try
         {
-            await RunDaemon(devicePath, config);
+            await RunDaemon(devicePath, config, _cts.Token);
+            return 0;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("Daemon cancelled.");
             return 0;
         }
         catch (Exception ex)
@@ -56,60 +64,70 @@ class Program
             Console.Error.WriteLine(ex.StackTrace);
             return 1;
         }
+        finally
+        {
+            _cts?.Dispose();
+        }
     }
 
-    static async Task RunDaemon(string devicePath, DaemonConfig config)
+    static async Task RunDaemon(string devicePath, DaemonConfig config, CancellationToken cancellationToken)
     {
-        using var ttyOutput = new TtyOutputHandler(config.TtyPath);
+        // Determine TTY path
+        string ttyPath = config.TtyPath ?? "/dev/tty";
+        
+        // Create output handler
+        var ttyOutput = new TtyOutputHandler(ttyPath);
         
         if (!ttyOutput.IsValid())
         {
-            throw new InvalidOperationException("Cannot write to TTY output");
-        }
-
-        // Initialize mouse tracking monitor
-        TtyInputMonitor? trackingMonitor = null;
-        if (config.HonorTrackingCommands)
-        {
-            trackingMonitor = new TtyInputMonitor(config.TtyPath);
-            Console.WriteLine("Mouse tracking control: Enabled (will only send events when apps request it)");
-        }
-        else
-        {
-            Console.WriteLine("Mouse tracking control: Disabled (always sending events)");
+            throw new InvalidOperationException($"Cannot write to TTY: {ttyPath}");
         }
 
         var encoder = new AnsiMouseEncoder(config.Protocol);
+        
+        // Create processor with smart raw mode detection
         _processor = new MouseEventProcessor(
-            encoder, 
+            encoder,
             ttyOutput,
-            () => trackingMonitor?.MouseTrackingEnabled ?? true
+            () => EvDev.IsInRawMode(ttyPath)
         );
 
+        Console.WriteLine($"Target TTY: {ttyPath}");
         Console.WriteLine($"Mouse protocol: {config.Protocol}");
+        Console.WriteLine("Smart mode: Only sending events when TTY is in raw mode");
         Console.WriteLine("Daemon running. Press Ctrl+C to exit.");
         Console.WriteLine();
 
-        // Start tracking monitor if enabled
-        var cts = new CancellationTokenSource();
-        if (trackingMonitor != null)
+        // Periodically log TTY state changes
+        _ = Task.Run(async () =>
         {
-            _ = trackingMonitor.StartMonitoringAsync(cts.Token);
-        }
+            bool lastRawState = false;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                bool currentRawState = EvDev.IsInRawMode(ttyPath);
+                if (currentRawState != lastRawState)
+                {
+                    Console.WriteLine($"[TTY State] Raw mode: {currentRawState} - {(currentRawState ? "Sending mouse events" : "NOT sending mouse events")}");
+                    lastRawState = currentRawState;
+                }
+                await Task.Delay(1000, cancellationToken);
+            }
+        }, cancellationToken);
 
         using var stream = EvDev.OpenAsStream(devicePath);
         int fd = (int)stream.SafeFileHandle.DangerousGetHandle();
 
         try
         {
-            EvDev.Grab(fd, true); // Grab exclusive access
+            EvDev.Grab(fd, true);
+            Console.WriteLine("✓ Mouse grabbed - Press Ctrl+C to release");
 
             // Main event loop
-            while (!cts.Token.IsCancellationRequested)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
-                    var (success, inputEvent) = await EvDev.ReadEventAsync(stream, cts.Token);
+                    var (success, inputEvent) = await EvDev.ReadEventAsync(stream, cancellationToken);
                     
                     if (success)
                     {
@@ -133,8 +151,7 @@ class Program
                     }
                     else
                     {
-                        // No event available, small delay
-                        await Task.Delay(1, cts.Token);
+                        await Task.Delay(1, cancellationToken);
                     }
                 }
                 catch (OperationCanceledException)
@@ -144,19 +161,33 @@ class Program
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Error processing event: {ex.Message}");
-                    await Task.Delay(100, cts.Token);
+                    
+                    if (cancellationToken.IsCancellationRequested)
+                        break;
+                        
+                    await Task.Delay(100, cancellationToken);
                 }
             }
-
-            EvDev.Grab(fd, false);
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("Operation cancelled, cleaning up...");
         }
         finally
         {
-            stream.Close(); // This will close the fd
+            try
+            {
+                EvDev.Grab(fd, false);
+                Console.WriteLine("✓ Mouse released");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error releasing mouse: {ex.Message}");
+            }
+            
+            stream.Close();
         }
 
-        cts.Cancel();
-        trackingMonitor?.Dispose();
         Console.WriteLine("Daemon stopped.");
     }
 
@@ -193,11 +224,6 @@ class Program
                             config.Protocol = protocol;
                     }
                     break;
-
-                case "--honor-tracking":
-                case "--smart":
-                    config.HonorTrackingCommands = true;
-                    break;
             }
         }
 
@@ -213,16 +239,26 @@ Options:
   -h, --help              Show this help message
   -d, --device PATH       Specify mouse device path (e.g., /dev/input/event3)
                          If not specified, auto-detects the first mouse device
-  -t, --tty PATH         Specify TTY output path (default: stdout)
+  -t, --tty PATH         Specify TTY output path (default: /dev/tty)
   -p, --protocol PROTO   Mouse protocol: X10, Normal, or SGR (default: SGR)
 
-Examples:
-  evgpm                          # Auto-detect mouse, use SGR protocol
-  evgpm -d /dev/input/event3     # Use specific device
-  evgpm -p Normal                # Use Normal protocol instead of SGR
-  evgpm -t /dev/tty1             # Output to specific TTY
+  NOTE: EvGPM automatically detects when the TTY is in raw mode (indicating a 
+  mouse-aware application like vim, tmux, mc, or emacs is running) and only
+  sends mouse events during that time. 
 
-Note: May require root privileges to access /dev/input devices.
+Examples:
+  evgpm                          # Auto-detect mouse device
+  evgpm -t /dev/tty2             # Send events to specific TTY
+  evgpm -d /dev/input/event3     # Use specific mouse device
+  evgpm -p Normal                # Use Normal protocol instead of SGR
+
+Testing:
+  1. Switch to a TTY (Ctrl+Alt+F2)
+  2. Run: sudo evgpm -t /dev/tty2
+  3. Start vim: vim -c 'set mouse=a' test.txt
+  4. Mouse should work in vim, but not in the shell
+
+Note: Requires root privileges to access /dev/input devices.
       Run with 'sudo' if you get permission errors.
 ");
     }
@@ -233,6 +269,5 @@ Note: May require root privileges to access /dev/input devices.
         public string? DevicePath { get; set; }
         public string? TtyPath { get; set; }
         public AnsiMouseEncoder.MouseProtocol Protocol { get; set; } = AnsiMouseEncoder.MouseProtocol.SGR;
-        public bool HonorTrackingCommands { get; set; } = false;
     }
 }

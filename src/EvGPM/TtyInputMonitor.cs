@@ -3,15 +3,12 @@ using System.Text;
 namespace EvGPM;
 
 /// <summary>
-/// Monitors TTY input/output for mouse tracking control sequences
-/// Tracks when applications enable/disable mouse tracking
+/// Parses and tracks mouse tracking control sequences
+/// Maintains state of which mouse tracking modes are enabled
 /// </summary>
 public class TtyInputMonitor : IDisposable
 {
-    private readonly string _ttyPath;
-    private FileStream? _ttyStream;
     private bool _disposed = false;
-    private readonly byte[] _buffer = new byte[1024];
     
     // Mouse tracking state flags
     public bool MouseTrackingEnabled { get; private set; }
@@ -20,47 +17,10 @@ public class TtyInputMonitor : IDisposable
     public bool AnyMotionTracking { get; private set; }
     public bool SgrMode { get; private set; }
     public bool Utf8Mode { get; private set; }
+    public bool UrxvtMode { get; private set; }
+
+    public event EventHandler<bool>? MouseTrackingStateChanged;
     
-    public TtyInputMonitor(string? ttyPath = null)
-    {
-        _ttyPath = ttyPath ?? "/dev/tty";
-    }
-
-    public async Task StartMonitoringAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            // Open TTY for reading - we need to read the output stream that apps write to
-            // This requires intercepting the PTY master side, which is complex
-            // Alternative: Use ioctl to monitor terminal state or use pseudo-terminal
-            
-            // For now, we'll implement a simpler approach:
-            // Monitor /dev/ptmx or the specific pty device
-            // This is a simplified version that would need root privileges
-            
-            await MonitorTtyAsync(cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"Error monitoring TTY: {ex.Message}");
-        }
-    }
-
-    private async Task MonitorTtyAsync(CancellationToken cancellationToken)
-    {
-        // This is a placeholder for the actual implementation
-        // In practice, you would need to:
-        // 1. Use a pseudo-terminal (pty) pair
-        // 2. Intercept application output
-        // 3. Parse escape sequences
-        // 4. Forward everything except mouse control sequences
-        
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            await Task.Delay(100, cancellationToken);
-        }
-    }
-
     /// <summary>
     /// Parse escape sequences from TTY output to detect mouse tracking changes
     /// </summary>
@@ -80,51 +40,65 @@ public class TtyInputMonitor : IDisposable
             string paramStr = sequence.Substring(3, sequence.Length - 4);
             string[] parameters = paramStr.Split(';');
             
+            bool stateChanged = false;
             foreach (string param in parameters)
             {
                 if (int.TryParse(param, out int mode))
                 {
-                    HandleMouseMode(mode, enable);
+                    if (HandleMouseMode(mode, enable))
+                    {
+                        stateChanged = true;
+                    }
                 }
+            }
+
+            if (stateChanged)
+            {
+                MouseTrackingStateChanged?.Invoke(this, MouseTrackingEnabled);
             }
         }
     }
 
-    private void HandleMouseMode(int mode, bool enable)
+    /// <summary>
+    /// Handle a specific mouse mode change
+    /// Returns true if the mode affected mouse tracking state
+    /// </summary>
+    private bool HandleMouseMode(int mode, bool enable)
     {
+        bool wasEnabled = MouseTrackingEnabled;
+
         switch (mode)
         {
             case 1000: // X10 mouse reporting (button press/release)
                 ButtonEventTracking = enable;
                 UpdateMouseTrackingState();
-                Console.WriteLine($"Mouse tracking 1000 (button events): {enable}");
-                break;
+                return true;
                 
             case 1002: // Button event tracking + motion while button pressed
                 MotionTracking = enable;
                 UpdateMouseTrackingState();
-                Console.WriteLine($"Mouse tracking 1002 (motion): {enable}");
-                break;
+                return true;
                 
             case 1003: // Any motion tracking
                 AnyMotionTracking = enable;
                 UpdateMouseTrackingState();
-                Console.WriteLine($"Mouse tracking 1003 (any motion): {enable}");
-                break;
+                return true;
                 
             case 1006: // SGR extended mouse mode
                 SgrMode = enable;
-                Console.WriteLine($"Mouse tracking 1006 (SGR mode): {enable}");
-                break;
+                // SGR is an encoding mode, doesn't affect tracking state
+                return false;
                 
             case 1005: // UTF-8 mouse mode
                 Utf8Mode = enable;
-                Console.WriteLine($"Mouse tracking 1005 (UTF-8 mode): {enable}");
-                break;
+                return false;
                 
             case 1015: // URXVT mouse mode
-                Console.WriteLine($"Mouse tracking 1015 (URXVT mode): {enable}");
-                break;
+                UrxvtMode = enable;
+                return false;
+
+            default:
+                return false;
         }
     }
 
@@ -133,11 +107,49 @@ public class TtyInputMonitor : IDisposable
         MouseTrackingEnabled = ButtonEventTracking || MotionTracking || AnyMotionTracking;
     }
 
+    /// <summary>
+    /// Reset all mouse tracking states
+    /// </summary>
+    public void Reset()
+    {
+        MouseTrackingEnabled = false;
+        ButtonEventTracking = false;
+        MotionTracking = false;
+        AnyMotionTracking = false;
+        SgrMode = false;
+        Utf8Mode = false;
+        UrxvtMode = false;
+    }
+
+    /// <summary>
+    /// Get a summary of the current mouse tracking state
+    /// </summary>
+    public string GetStateSummary()
+    {
+        if (!MouseTrackingEnabled)
+            return "Mouse tracking: DISABLED";
+
+        var modes = new List<string>();
+        if (ButtonEventTracking) modes.Add("Buttons(1000)");
+        if (MotionTracking) modes.Add("Motion(1002)");
+        if (AnyMotionTracking) modes.Add("AnyMotion(1003)");
+        
+        var encoding = new List<string>();
+        if (SgrMode) encoding.Add("SGR(1006)");
+        if (Utf8Mode) encoding.Add("UTF8(1005)");
+        if (UrxvtMode) encoding.Add("URXVT(1015)");
+
+        string result = "Mouse tracking: ENABLED - " + string.Join(", ", modes);
+        if (encoding.Any())
+            result += " | Encoding: " + string.Join(", ", encoding);
+        
+        return result;
+    }
+
     public void Dispose()
     {
         if (!_disposed)
         {
-            _ttyStream?.Dispose();
             _disposed = true;
         }
     }

@@ -3,10 +3,15 @@ using System.Runtime.InteropServices;
 namespace EvGPM;
 
 /// <summary>
-/// Native Linux evdev interop layer
+/// Native Linux interop layer for evdev, TTY, and PTY operations
+/// Consolidates all P/Invoke declarations
 /// </summary>
 public static class EvDev
 {
+    // ============================================================================
+    // Event Device (evdev) Constants
+    // ============================================================================
+    
     // Event types
     public const ushort EV_SYN = 0x00;
     public const ushort EV_KEY = 0x01;
@@ -35,15 +40,47 @@ public static class EvDev
     public const ushort BTN_BACK = 0x116;
     public const ushort BTN_TASK = 0x117;
 
-    // ioctl commands
+    // ============================================================================
+    // File Operation Constants
+    // ============================================================================
+    
+    public const int O_RDONLY = 0;
+    public const int O_WRONLY = 1;
+    public const int O_RDWR = 2;
+    public const int O_NONBLOCK = 0x800;
+    public const int O_NOCTTY = 0x100;
+
+    // ============================================================================
+    // ioctl Constants
+    // ============================================================================
+    
     private const uint EVIOCGRAB = 0x40044590;
     private const uint EVIOCGNAME = 0x80ff4506;
     private const uint EVIOCGBIT = 0x80ff4520;
+    
+    public const ulong TCGETS = 0x5401;
+    public const ulong TCSETS = 0x5402;
+    public const ulong TIOCGWINSZ = 0x5413;
+    public const ulong TIOCSWINSZ = 0x5414;
 
-    // File operations
-    private const int O_RDONLY = 0;
-    private const int O_NONBLOCK = 0x800;
+    // ============================================================================
+    // Terminal Mode Flags
+    // ============================================================================
+    
+    public const uint ICANON = 0x00000002;  // Canonical mode
+    public const uint ECHO = 0x00000008;    // Echo input
 
+    // ============================================================================
+    // Poll Constants
+    // ============================================================================
+    
+    public const short POLLIN = 0x001;
+    public const short POLLOUT = 0x004;
+
+    // ============================================================================
+    // Structures
+    // ============================================================================
+    
     [StructLayout(LayoutKind.Sequential)]
     public struct InputEvent
     {
@@ -54,17 +91,62 @@ public static class EvDev
         public int Value;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Termios
+    {
+        public uint c_iflag;
+        public uint c_oflag;
+        public uint c_cflag;
+        public uint c_lflag;
+        public byte c_line;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+        public byte[] c_cc;
+        public uint c_ispeed;
+        public uint c_ospeed;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PollFd
+    {
+        public int fd;
+        public short events;
+        public short revents;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Winsize
+    {
+        public ushort ws_row;
+        public ushort ws_col;
+        public ushort ws_xpixel;
+        public ushort ws_ypixel;
+    }
+
+    // ============================================================================
+    // P/Invoke Declarations
+    // ============================================================================
+
+    // --- File Operations ---
+    
     [DllImport("libc", SetLastError = true)]
-    private static extern int open([MarshalAs(UnmanagedType.LPStr)] string pathname, int flags);
+    public static extern int open([MarshalAs(UnmanagedType.LPStr)] string pathname, int flags);
 
     [DllImport("libc", SetLastError = true)]
-    private static extern int close(int fd);
+    public static extern int close(int fd);
+
+    [DllImport("libc", SetLastError = true)]
+    public static extern IntPtr read(int fd, byte[] buf, UIntPtr count);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int read(int fd, IntPtr buf, int count);
 
     [DllImport("libc", SetLastError = true)]
-    private static extern int ioctl(int fd, uint request, IntPtr arg);
+    public static extern IntPtr write(int fd, byte[] buf, UIntPtr count);
+
+    // --- ioctl Operations ---
+    
+    [DllImport("libc", SetLastError = true)]
+    public static extern int ioctl(int fd, ulong request, IntPtr argp);
 
     [DllImport("libc", SetLastError = true, EntryPoint = "ioctl")]
     private static extern int ioctl_int(int fd, uint request, ref int arg);
@@ -72,11 +154,35 @@ public static class EvDev
     [DllImport("libc", SetLastError = true, EntryPoint = "ioctl")]
     private static extern int ioctl_bytes(int fd, uint request, byte[] arg);
 
+    [DllImport("libc", SetLastError = true, EntryPoint = "ioctl")]
+    public static extern int ioctl_termios(int fd, ulong request, ref Termios termios);
+
+    // --- PTY Operations ---
+    
+    [DllImport("libc", SetLastError = true)]
+    public static extern int posix_openpt(int flags);
+    
+    [DllImport("libc", SetLastError = true)]
+    public static extern int grantpt(int fd);
+    
+    [DllImport("libc", SetLastError = true)]
+    public static extern int unlockpt(int fd);
+    
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern IntPtr ptsname(int fd);
+
+    // --- Poll Operations ---
+    
+    [DllImport("libc", SetLastError = true)]
+    public static extern int poll(ref PollFd fds, uint nfds, int timeout);
+
+    // ============================================================================
+    // Event Device Helper Methods
+    // ============================================================================
+
     /// <summary>
     /// Opens an input device for reading in blocking mode.
     /// </summary>
-    /// <param name="devicePath">Path to the device file (e.g., /dev/input/event0)</param>
-    /// <returns>File descriptor on success, -1 on failure</returns>
     public static int Open(string devicePath)
     {
         return open(devicePath, O_RDONLY);
@@ -85,7 +191,6 @@ public static class EvDev
     /// <summary>
     /// Closes an open device file descriptor.
     /// </summary>
-    /// <param name="fd">File descriptor to close</param>
     public static void Close(int fd)
     {
         if (fd >= 0)
@@ -95,9 +200,6 @@ public static class EvDev
     /// <summary>
     /// Reads a single input event from the device synchronously (blocking).
     /// </summary>
-    /// <param name="fd">File descriptor of the open device</param>
-    /// <param name="evt">Output parameter containing the read event</param>
-    /// <returns>True if an event was successfully read, false otherwise</returns>
     public static unsafe bool ReadEvent(int fd, out InputEvent evt)
     {
         evt = default;
@@ -122,10 +224,7 @@ public static class EvDev
 
     /// <summary>
     /// Grabs or releases exclusive access to the input device.
-    /// When grabbed, other applications cannot read events from this device.
     /// </summary>
-    /// <param name="fd">File descriptor of the open device</param>
-    /// <param name="grab">True to grab exclusive access, false to release</param>
     public static void Grab(int fd, bool grab)
     {
         int value = grab ? 1 : 0;
@@ -135,8 +234,6 @@ public static class EvDev
     /// <summary>
     /// Retrieves the human-readable name of the input device.
     /// </summary>
-    /// <param name="fd">File descriptor of the open device</param>
-    /// <returns>Device name string, or "Unknown" if the name cannot be retrieved</returns>
     public static string GetDeviceName(int fd)
     {
         byte[] buffer = new byte[256];
@@ -153,11 +250,8 @@ public static class EvDev
     }
 
     /// <summary>
-    /// Checks whether the device supports a specific event type (e.g., EV_KEY, EV_REL, EV_ABS).
+    /// Checks whether the device supports a specific event type.
     /// </summary>
-    /// <param name="fd">File descriptor of the open device</param>
-    /// <param name="eventType">Event type constant to check (e.g., EV_KEY, EV_REL)</param>
-    /// <returns>True if the device supports the event type, false otherwise</returns>
     public static bool HasEventType(int fd, ushort eventType)
     {
         byte[] buffer = new byte[32]; // 256 bits = 32 bytes
@@ -178,11 +272,8 @@ public static class EvDev
     }
 
     /// <summary>
-    /// Opens an input device as a FileStream in non-blocking mode for asynchronous reading.
+    /// Opens an input device as a FileStream in non-blocking mode.
     /// </summary>
-    /// <param name="devicePath">Path to the device file (e.g., /dev/input/event0)</param>
-    /// <returns>FileStream wrapping the device file descriptor</returns>
-    /// <exception cref="IOException">Thrown if the device cannot be opened</exception>
     public static FileStream OpenAsStream(string devicePath)
     {
         int fd = open(devicePath, O_RDONLY | O_NONBLOCK);
@@ -195,11 +286,7 @@ public static class EvDev
 
     /// <summary>
     /// Asynchronously reads a single input event from the device stream.
-    /// Returns immediately if no event is available (non-blocking).
     /// </summary>
-    /// <param name="stream">FileStream opened with OpenAsStream</param>
-    /// <param name="cancellationToken">Optional cancellation token</param>
-    /// <returns>Tuple containing success flag and the input event if successful</returns>
     public static async Task<(bool success, InputEvent evt)> ReadEventAsync(FileStream stream, CancellationToken cancellationToken = default)
     {
         int size = Marshal.SizeOf<InputEvent>();
@@ -220,5 +307,112 @@ public static class EvDev
         }
         
         return (false, default);
+    }
+
+    // ============================================================================
+    // Terminal Helper Methods
+    // ============================================================================
+
+    /// <summary>
+    /// Check if a TTY is in raw mode (canonical mode disabled).
+    /// </summary>
+    public static bool IsInRawMode(int fd)
+    {
+        try
+        {
+            var termios = new Termios();
+            termios.c_cc = new byte[32];
+            
+            if (ioctl_termios(fd, TCGETS, ref termios) == 0)
+            {
+                // Check if canonical mode is disabled (raw mode)
+                bool isCanonical = (termios.c_lflag & ICANON) != 0;
+                return !isCanonical;
+            }
+        }
+        catch
+        {
+            // If we can't check, assume not raw mode (safer)
+        }
+        
+        return false;
+    }
+
+    /// <summary>
+    /// Check if a TTY is in raw mode by path.
+    /// </summary>
+    public static bool IsInRawMode(string ttyPath)
+    {
+        int fd = open(ttyPath, O_RDONLY | O_NOCTTY);
+        if (fd < 0)
+            return false;
+
+        try
+        {
+            return IsInRawMode(fd);
+        }
+        finally
+        {
+            close(fd);
+        }
+    }
+
+    /// <summary>
+    /// Get terminal window size.
+    /// </summary>
+    public static (int rows, int cols) GetWindowSize(int fd)
+    {
+        var winsize = new Winsize();
+        IntPtr winsizePtr = Marshal.AllocHGlobal(Marshal.SizeOf(winsize));
+        
+        try
+        {
+            if (ioctl(fd, TIOCGWINSZ, winsizePtr) == 0)
+            {
+                winsize = Marshal.PtrToStructure<Winsize>(winsizePtr);
+                return (winsize.ws_row, winsize.ws_col);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(winsizePtr);
+        }
+        
+        return (24, 80); // Default
+    }
+
+    /// <summary>
+    /// Set terminal window size.
+    /// </summary>
+    public static void SetWindowSize(int fd, int rows, int cols)
+    {
+        var winsize = new Winsize
+        {
+            ws_row = (ushort)rows,
+            ws_col = (ushort)cols,
+            ws_xpixel = 0,
+            ws_ypixel = 0
+        };
+        
+        IntPtr winsizePtr = Marshal.AllocHGlobal(Marshal.SizeOf(winsize));
+        
+        try
+        {
+            Marshal.StructureToPtr(winsize, winsizePtr, false);
+            ioctl(fd, TIOCSWINSZ, winsizePtr);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(winsizePtr);
+        }
+    }
+
+    /// <summary>
+    /// Copy window size from source to destination file descriptor.
+    /// </summary>
+    public static void CopyWindowSize(int sourceFd, int destFd)
+    {
+        var (rows, cols) = GetWindowSize(sourceFd);
+        SetWindowSize(destFd, rows, cols);
     }
 }
